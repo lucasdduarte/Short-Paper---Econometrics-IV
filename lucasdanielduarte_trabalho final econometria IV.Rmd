@@ -1,0 +1,1106 @@
+---
+title: "Econometria IV - Trabalho Final"
+author: "Lucas Daniel Duarte"
+date: "2023-12-12"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+Carregando o ambiente necessário para análise:
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("GetBCBData")
+#install.packages("tidyverse")
+#install.packages("urca")
+#install.packages("vars")
+#install.packages("forecast")
+#install.packages("mFilter")
+#install.packages("tseries")
+#install.packages("lubridate")
+#install.packages("dplyr")
+#install.packages("readr")
+#install.packages("TSstudio")
+#install.packages ("readxl")
+#install.packages ("xts")
+#install.packages("seasonal")
+library(GetBCBData)
+library(tidyverse)
+library(urca)
+library(vars)
+library(forecast)
+library(mFilter)
+library(tseries)
+library(lubridate)
+library(dplyr)
+library(readr)
+library(TSstudio)
+library (readxl)
+library (xts)
+library (seasonal)
+```
+
+Carregando a base de dados a ser utilizada:
+
+```{R}
+setwd("D:/")
+base_SVAR <- read_excel("D:/Base_Trabalho ECIV.xlsx")
+base_SVAR_ts <- ts(base_SVAR[,-1], start = c(2002,1), frequency = 12)
+```
+
+Tratando a base de dados a ser utilizada:
+1. dessazonalizando as séries de produção industrial
+2. aplicando logaritmo natural em todas colunas menos selic-over
+3. tomando a primeira diferença para estacionarizar as séries
+
+```{R}
+#Dessazonaliando as séries de produção industrial
+dessaz <- seas(base_SVAR_ts[,1:14])
+base_SVAR_ts_dessaz <- final(dessaz)
+ts.plot(base_SVAR_ts[,1],base_SVAR_ts_dessaz [,1], gpars = list(ylab ="Prod_Ind_BR", col = c ("black","blue")))
+ts.plot(base_SVAR_ts[,14],base_SVAR_ts_dessaz [,14], gpars = list(ylab ="Prod_Ind_SP", col = c ("black","blue")))
+
+#Juntando os dados de IPCA
+base_SVAR_ts_dessaz <- cbind(base_SVAR_ts_dessaz, base_SVAR_ts[,15])
+
+#aplicando logaritmo em todos os dados (com exceção da taxa de juros selic-over)
+base_SVAR_ts_dessaz_ln <- log(base_SVAR_ts_dessaz)
+
+#Tomando a primeira diferença do log dos dados (com exceção da taxa de juros selic-over)
+
+base_SVAR_ts_dessaz_ln_diff <- diff(base_SVAR_ts_dessaz_ln)
+
+ts.plot(base_SVAR_ts_dessaz_ln_diff[,1],gpars = list(ylab = "Taxa de Crescimento da Prod_Ind_BR", col = c("black")))
+ts.plot(base_SVAR_ts_dessaz_ln_diff[,14],gpars = list(ylab = "Taxa de Crescimento da Prod_Ind_SP", col = c("black")))
+
+#dif_selic <- diff(base_SVAR_ts[,16])
+
+selic_over <- base_SVAR_ts[-1,16]
+
+#base de dados final após tratamentos
+base_SVAR_final <- cbind(base_SVAR_ts_dessaz_ln_diff, selic_over)
+colnames(base_SVAR_final) <- cbind ("g_BR","g_AM","g_BA","g_CE","g_ES", "g_GO", "g_MG","g_PA","g_PE","g_PR", "g_RJ","g_RS","g_SC","g_SP","IPCA", "Selic-Over")
+#ts.plot(base_SVAR_final[,15],gpars = list(ylab = "Taxa de Juros Selic Over", col = c("black")))
+
+
+```
+
+Verificando a estacionariedade das séries
+
+```{r}
+adf.test(base_SVAR_final[,1], alternative = 'stationary')
+adf.test(base_SVAR_final[,2], alternative = 'stationary')
+adf.test(base_SVAR_final[,3], alternative = 'stationary')
+adf.test(base_SVAR_final[,4], alternative = 'stationary')
+adf.test(base_SVAR_final[,5], alternative = 'stationary')
+adf.test(base_SVAR_final[,6], alternative = 'stationary')
+adf.test(base_SVAR_final[,7], alternative = 'stationary')
+adf.test(base_SVAR_final[,8], alternative = 'stationary')
+adf.test(base_SVAR_final[,9], alternative = 'stationary')
+adf.test(base_SVAR_final[,10], alternative = 'stationary')
+adf.test(base_SVAR_final[,11], alternative = 'stationary')
+adf.test(base_SVAR_final[,12], alternative = 'stationary')
+adf.test(base_SVAR_final[,13], alternative = 'stationary')
+adf.test(base_SVAR_final[,14], alternative = 'stationary')
+adf.test(base_SVAR_final[,15], alternative = 'stationary')
+adf.test(base_SVAR_final[,16], alternative = 'stationary')
+adf.test(base_SVAR_final[1:106,16], alternative = 'stationary')
+adf.test(base_SVAR_final[107:261,16], alternative = 'stationary')
+```
+
+
+Agora, iremos estimar o modelo VAR estrutural. Lembrando que temos que estimar um VAR para cada estado para os quais temos dados e iremos impor a restrição de Cholesky seguindo a ordem BR-Estado-IPCA-Juros das variáveis
+
+Primeiro, criando a restrição de Cholesky
+
+```{r}
+#Restrição - Cholesky
+amat <- diag (4)
+amat [2,1] <- NA
+amat [3,1] <- NA
+amat [4,1] <- NA
+amat [3,2] <- NA
+amat [4,2] <- NA
+amat [4,3] <- NA
+amat
+
+
+```
+Agora, vamos estimar o SVAR para cada estado, considerando:
+
+1) Toda amostra
+2) Período dos Autores
+3) Período estendido (de dezembro 2010 até outurbro de 2023)
+
+```{r}
+##########################################
+#################AMAZONAS#################
+##########################################
+#Selecionando o Lag
+lagselect_AM <- VARselect(base_SVAR_final[,c(1,2,15,16)],lag.max=10, type="both")
+lagselect_AM$selection
+lagselect_AM$criteria
+
+#Estimando o VAR Reduzido
+VAR_AM <- VAR(base_SVAR_final[-261,c(1,2,15,16)],p=5, season = NULL, exog = NULL, type = "both")
+VAR_AM
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_AM, type="BG")
+arch.test(VAR_AM, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_AM <- SVAR(VAR_AM, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_AM
+#Função Impulso-Resposta
+SVAR_AM_irf <- irf(SVAR_AM, impulse = "Selic.Over", response = "g_AM", n.ahead=20, ortho = TRUE)
+plot(SVAR_AM_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_AM_pa <- VARselect(base_SVAR_final[1:106,c(1,2,15,16)],lag.max=10, type="both")
+lagselect_AM_pa$selection
+lagselect_AM_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_AM_pa <- VAR(base_SVAR_final[1:106,c(1,2,15,16)], p = 3, season = NULL, exog = NULL, type = "const")
+VAR_AM_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_AM_pa, type="BG")
+arch.test(VAR_AM_pa, multivariate.only = FALSE)
+
+
+#Estimando o VAR Estrutural
+SVAR_AM_pa <- SVAR(VAR_AM_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_AM_pa
+#Função Impulso-Resposta
+SVAR_AM_irf_pa <- irf(SVAR_AM_pa, impulse = "Selic.Over", response = "g_AM", n.ahead=20, ortho = TRUE)
+plot(SVAR_AM_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_AM_pe <- VARselect(base_SVAR_final[107:261,c(1,2,15,16)],lag.max=10, type="both")
+lagselect_AM_pe$selection
+lagselect_AM_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_AM_pe <- VAR(base_SVAR_final[107:261,c(1,2,15,16)], p = lagselect_AM_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_AM_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_AM_pe, type="BG")
+arch.test(VAR_AM_pe, multivariate.only = FALSE)
+
+
+#Estimando o VAR Estrutural
+SVAR_AM_pe <- SVAR(VAR_AM_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_AM_pe
+#Função Impulso-Resposta
+SVAR_AM_irf_pe <- irf(SVAR_AM_pe, impulse = "Selic.Over", response = "g_AM", n.ahead=20, ortho = TRUE)
+plot(SVAR_AM_irf_pe)
+
+```
+
+```{r}
+##########################################
+#################BAHIA#################
+##########################################
+#Selecionando o Lag
+lagselect_BA <- VARselect(base_SVAR_final[,c(1,3,15,16)],lag.max=10, type="both")
+lagselect_BA$selection
+lagselect_BA$criteria
+
+#Estimando o VAR Reduzido
+VAR_BA <- VAR(base_SVAR_final[,c(1,3,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_BA
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_BA, type="BG")
+arch.test(VAR_BA, multivariate.only = FALSE)
+
+
+#Estimando o VAR Estrutural
+SVAR_BA <- SVAR(VAR_BA, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_BA
+#Função Impulso-Resposta
+SVAR_BA_irf <- irf(SVAR_BA, impulse = "Selic.Over", response = "g_BA", n.ahead=20, ortho = TRUE)
+plot(SVAR_BA_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_BA_pa <- VARselect(base_SVAR_final[1:106,c(1,3,15,16)],lag.max=10, type="both")
+lagselect_BA_pa$selection
+lagselect_BA_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_BA_pa <- VAR(base_SVAR_final[1:106,c(1,3,15,16)], p = 2, season = NULL, exog = NULL, type = "const")
+VAR_BA_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_BA_pa, type="BG")
+arch.test(VAR_BA_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_BA_pa <- SVAR(VAR_BA_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_BA_pa
+#Função Impulso-Resposta
+SVAR_BA_irf_pa <- irf(SVAR_BA_pa, impulse = "Selic.Over", response = "g_BA", n.ahead=20, ortho = TRUE)
+plot(SVAR_BA_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_BA_pe <- VARselect(base_SVAR_final[107:261,c(1,3,15,16)],lag.max=10, type="both")
+lagselect_BA_pe$selection
+lagselect_BA_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_BA_pe <- VAR(base_SVAR_final[107:261,c(1,3,15,16)], p = lagselect_BA_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_BA_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_BA_pe, type="BG")
+arch.test(VAR_BA_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_BA_pe <- SVAR(VAR_BA_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_BA_pe
+#Função Impulso-Resposta
+SVAR_BA_irf_pe <- irf(SVAR_BA_pe, impulse = "Selic.Over", response = "g_BA", n.ahead=20, ortho = TRUE)
+plot(SVAR_BA_irf_pe)
+```
+
+```{r}
+##########################################
+#################CEARÁ#################
+##########################################
+#Selecionando o Lag
+lagselect_CE <- VARselect(base_SVAR_final[,c(1,4,15,16)],lag.max=10, type="both")
+lagselect_CE$selection
+lagselect_CE$criteria
+
+#Estimando o VAR Reduzido
+VAR_CE <- VAR(base_SVAR_final[,c(1,4,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_CE
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_CE, type="BG")
+arch.test(VAR_CE, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_CE <- SVAR(VAR_CE, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_CE
+#Função Impulso-Resposta
+SVAR_CE_irf <- irf(SVAR_CE, impulse = "Selic.Over", response = "g_CE", n.ahead=20, ortho = TRUE)
+plot(SVAR_CE_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_CE_pa <- VARselect(base_SVAR_final[1:106,c(1,4,15,16)],lag.max=10, type="both")
+lagselect_CE_pa$selection
+lagselect_CE_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_CE_pa <- VAR(base_SVAR_final[1:106,c(1,4,15,16)], p = 2, season = NULL, exog = NULL, type = "const")
+VAR_CE_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_CE_pa, type="BG")
+arch.test(VAR_CE_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_CE_pa <- SVAR(VAR_CE_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_CE_pa
+#Função Impulso-Resposta
+SVAR_CE_irf_pa <- irf(SVAR_CE_pa, impulse = "Selic.Over", response = "g_CE", n.ahead=20, ortho = TRUE)
+plot(SVAR_CE_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_CE_pe <- VARselect(base_SVAR_final[107:261,c(1,4,15,16)],lag.max=10, type="both")
+lagselect_CE_pe$selection
+lagselect_CE_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_CE_pe <- VAR(base_SVAR_final[107:261,c(1,4,15,16)], p = 4, season = NULL, exog = NULL, type = "const")
+VAR_CE_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_CE_pe, type="BG")
+arch.test(VAR_CE_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_CE_pe <- SVAR(VAR_CE_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_CE_pe
+#Função Impulso-Resposta
+SVAR_CE_irf_pe <- irf(SVAR_CE_pe, impulse = "Selic.Over", response = "g_CE", n.ahead=20, ortho = TRUE)
+plot(SVAR_CE_irf_pe)
+```
+
+
+```{r}
+##########################################
+#################ESPÍRITOSANTO#################
+##########################################
+#Selecionando o Lag
+lagselect_ES <- VARselect(base_SVAR_final[,c(1,5,15,16)],lag.max=10, type="both")
+lagselect_ES$selection
+lagselect_ES$criteria
+
+#Estimando o VAR Reduzido
+VAR_ES <- VAR(base_SVAR_final[,c(1,5,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_ES
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_ES, type="BG")
+arch.test(VAR_ES, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_ES <- SVAR(VAR_ES, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_ES
+#Função Impulso-Resposta
+SVAR_ES_irf <- irf(SVAR_ES, impulse = "Selic.Over", response = "g_ES", n.ahead=20, ortho = TRUE)
+plot(SVAR_ES_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_ES_pa <- VARselect(base_SVAR_final[1:106,c(1,5,15,16)],lag.max=10, type="both")
+lagselect_ES_pa$selection
+lagselect_ES_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_ES_pa <- VAR(base_SVAR_final[1:106,c(1,5,15,16)], p = lagselect_ES_pa$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_ES_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_ES_pa, type="BG")
+arch.test(VAR_ES_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_ES_pa <- SVAR(VAR_ES_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_ES_pa
+#Função Impulso-Resposta
+SVAR_ES_irf_pa <- irf(SVAR_ES_pa, impulse = "Selic.Over", response = "g_ES", n.ahead=20, ortho = TRUE)
+plot(SVAR_ES_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_ES_pe <- VARselect(base_SVAR_final[107:261,c(1,5,15,16)],lag.max=10, type="both")
+lagselect_ES_pe$selection
+lagselect_ES_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_ES_pe <- VAR(base_SVAR_final[107:261,c(1,5,15,16)], p = lagselect_ES_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_ES_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_ES_pe, type="BG")
+arch.test(VAR_ES_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_ES_pe <- SVAR(VAR_ES_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_ES
+#Função Impulso-Resposta
+SVAR_ES_irf_pe <- irf(SVAR_ES_pe, impulse = "Selic.Over", response = "g_ES", n.ahead=20, ortho = TRUE)
+plot(SVAR_ES_irf_pe)
+```
+
+```{r}
+##########################################
+#################GOIÁS#################
+##########################################
+#Selecionando o Lag
+lagselect_GO <- VARselect(base_SVAR_final[,c(1,6,15,16)],lag.max=10, type="both")
+lagselect_GO$selection
+lagselect_GO$criteria
+
+#Estimando o VAR Reduzido
+VAR_GO <- VAR(base_SVAR_final[,c(1,6,15,16)], p = lagselect_GO$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_GO
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_GO, type="BG")
+arch.test(VAR_GO, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_GO <- SVAR(VAR_GO, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_GO
+#Função Impulso-Resposta
+SVAR_GO_irf <- irf(SVAR_GO, impulse = "Selic.Over", response = "g_GO", n.ahead=20, ortho = TRUE)
+plot(SVAR_GO_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_GO_pa <- VARselect(base_SVAR_final[1:106,c(1,6,15,16)],lag.max=10, type="both")
+lagselect_GO_pa$selection
+lagselect_GO_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_GO_pa <- VAR(base_SVAR_final[1:106,c(1,6,15,16)], p = 4, season = NULL, exog = NULL, type = "const")
+VAR_GO_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_GO_pa, type="BG")
+arch.test(VAR_GO_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_GO_pa <- SVAR(VAR_GO_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_GO_pa
+#Função Impulso-Resposta
+SVAR_GO_irf_pa <- irf(SVAR_GO_pa, impulse = "Selic.Over", response = "g_GO", n.ahead=20, ortho = TRUE)
+plot(SVAR_GO_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_GO_pe <- VARselect(base_SVAR_final[107:261,c(1,6,15,16)],lag.max=10, type="both")
+lagselect_GO_pe$selection
+lagselect_GO_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_GO_pe <- VAR(base_SVAR_final[107:261,c(1,6,15,16)], p = lagselect_GO_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_GO_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_GO_pe, type="BG")
+arch.test(VAR_GO_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_GO_pe <- SVAR(VAR_GO_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_GO
+#Função Impulso-Resposta
+SVAR_GO_irf_pe <- irf(SVAR_GO_pe, impulse = "Selic.Over", response = "g_GO", n.ahead=20, ortho = TRUE)
+plot(SVAR_GO_irf_pe)
+```
+
+```{r}
+##########################################
+#################MINAS#################
+##########################################
+#Selecionando o Lag
+lagselect_MG <- VARselect(base_SVAR_final[,c(1,7,15,16)],lag.max=10, type="both")
+lagselect_MG$selection
+lagselect_MG$criteria
+
+#Estimando o VAR Reduzido
+VAR_MG <- VAR(base_SVAR_final[,c(1,7,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_MG
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_MG, type="BG")
+arch.test(VAR_MG, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_MG <- SVAR(VAR_MG, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_MG
+#Função Impulso-Resposta
+SVAR_MG_irf <- irf(SVAR_MG, impulse = "Selic.Over", response = "g_MG", n.ahead=20, ortho = TRUE)
+plot(SVAR_MG_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_MG_pa <- VARselect(base_SVAR_final[1:106,c(1,7,15,16)],lag.max=10, type="both")
+lagselect_MG_pa$selection
+lagselect_MG_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_MG_pa <- VAR(base_SVAR_final[1:106,c(1,7,15,16)], p = 2, season = NULL, exog = NULL, type = "const")
+VAR_MG_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_MG_pa, type="BG")
+arch.test(VAR_MG_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_MG_pa <- SVAR(VAR_MG, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_MG_pa
+#Função Impulso-Resposta
+SVAR_MG_irf_pa <- irf(SVAR_MG_pa, impulse = "Selic.Over", response = "g_MG", n.ahead=20, ortho = TRUE)
+plot(SVAR_MG_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_MG_pe <- VARselect(base_SVAR_final[107:261,c(1,7,15,16)],lag.max=10, type="both")
+lagselect_MG_pe$selection
+lagselect_MG_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_MG_pe <- VAR(base_SVAR_final[107:261,c(1,7,15,16)], p = lagselect_MG_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_MG_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_MG_pe, type="BG")
+arch.test(VAR_MG_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_MG_pe <- SVAR(VAR_MG, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_MG_pe
+#Função Impulso-Resposta
+SVAR_MG_irf_pe <- irf(SVAR_MG_pe, impulse = "Selic.Over", response = "g_MG", n.ahead=20, ortho = TRUE)
+plot(SVAR_MG_irf_pe)
+```
+
+```{r}
+##########################################
+#################PARÁ#################
+##########################################
+#Selecionando o Lag
+lagselect_PA <- VARselect(base_SVAR_final[,c(1,8,15,16)],lag.max=10, type="both")
+lagselect_PA$selection
+lagselect_PA$criteria
+
+#Estimando o VAR Reduzido
+VAR_PA <- VAR(base_SVAR_final[,c(1,8,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_PA
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PA, type="BG")
+arch.test(VAR_PA, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PA <- SVAR(VAR_PA, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PA
+#Função Impulso-Resposta
+SVAR_PA_irf <- irf(SVAR_PA, impulse = "Selic.Over", response = "g_PA", n.ahead=20, ortho = TRUE)
+plot(SVAR_PA_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_PA_pa <- VARselect(base_SVAR_final[1:106,c(1,8,15,16)],lag.max=10, type="both")
+lagselect_PA_pa$selection
+lagselect_PA_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_PA_pa <- VAR(base_SVAR_final[1:106,c(1,8,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_PA_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PA_pa, type="BG")
+arch.test(VAR_PA_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PA_pa <- SVAR(VAR_PA, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PA_pa
+#Função Impulso-Resposta
+SVAR_PA_irf_pa <- irf(SVAR_PA_pa, impulse = "Selic.Over", response = "g_PA", n.ahead=20, ortho = TRUE)
+plot(SVAR_PA_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_PA_pe <- VARselect(base_SVAR_final[107:261,c(1,8,15,16)],lag.max=10, type="both")
+lagselect_PA_pe$selection
+lagselect_PA_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_PA_pe <- VAR(base_SVAR_final[107:261,c(1,8,15,16)], p = lagselect_PA_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_PA_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PA_pe, type="BG")
+arch.test(VAR_PA_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PA_pe <- SVAR(VAR_PA, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PA
+#Função Impulso-Resposta
+SVAR_PA_irf_pe <- irf(SVAR_PA, impulse = "Selic.Over", response = "g_PA", n.ahead=20, ortho = TRUE)
+plot(SVAR_PA_irf_pe)
+```
+
+```{r}
+##########################################
+#################PERNAMBUCO#################
+##########################################
+#Selecionando o Lag
+lagselect_PE <- VARselect(base_SVAR_final[,c(1,9,15,16)],lag.max=10, type="both")
+lagselect_PE$selection
+lagselect_PE$criteria
+
+#Estimando o VAR Reduzido
+VAR_PE <- VAR(base_SVAR_final[,c(1,9,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_PE
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PE, type="BG")
+arch.test(VAR_PE, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PE <- SVAR(VAR_PE, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PE
+#Função Impulso-Resposta
+SVAR_PE_irf <- irf(SVAR_PE, impulse = "Selic.Over", response = "g_PE", n.ahead=20, ortho = TRUE)
+plot(SVAR_PE_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_PE_pa <- VARselect(base_SVAR_final[1:106,c(1,9,15,16)],lag.max=10, type="both")
+lagselect_PE_pa$selection
+lagselect_PE_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_PE_pa <- VAR(base_SVAR_final[1:106,c(1,9,15,16)], p = 3, season = NULL, exog = NULL, type = "const")
+VAR_PE_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PE_pa, type="BG")
+arch.test(VAR_PE_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PE_pa <- SVAR(VAR_PE_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PE_pa
+#Função Impulso-Resposta
+SVAR_PE_irf_pa <- irf(SVAR_PE_pa, impulse = "Selic.Over", response = "g_PE", n.ahead=20, ortho = TRUE)
+plot(SVAR_PE_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_PE_pe <- VARselect(base_SVAR_final[107:261,c(1,9,15,16)],lag.max=10, type="both")
+lagselect_PE_pe$selection
+lagselect_PE_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_PE_pe <- VAR(base_SVAR_final[107:261,c(1,9,15,16)], p = lagselect_PE_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_PE_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PE_pe, type="BG")
+arch.test(VAR_PE_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PE_pe <- SVAR(VAR_PE_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PE_pe
+#Função Impulso-Resposta
+SVAR_PE_irf_pe <- irf(SVAR_PE_pe, impulse = "Selic.Over", response = "g_PE", n.ahead=20, ortho = TRUE)
+plot(SVAR_PE_irf_pe)
+```
+
+```{r}
+##########################################
+#################PARANÁ#################
+##########################################
+#Selecionando o Lag
+lagselect_PR <- VARselect(base_SVAR_final[,c(1,10,15,16)],lag.max=10, type="both")
+lagselect_PR$selection
+lagselect_PR$criteria
+
+#Estimando o VAR Reduzido
+VAR_PR <- VAR(base_SVAR_final[,c(1,10,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_PR
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PR, type="BG")
+arch.test(VAR_PR, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PR <- SVAR(VAR_PR, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PR
+
+#Função Impulso-Resposta
+SVAR_PR_irf <- irf(SVAR_PR, impulse = "Selic.Over", response = "g_PR", n.ahead=20, ortho = TRUE)
+plot(SVAR_PR_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_PR_pa <- VARselect(base_SVAR_final[1:106,c(1,10,15,16)],lag.max=10, type="both")
+lagselect_PR_pa$selection
+lagselect_PR_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_PR_pa <- VAR(base_SVAR_final[1:106,c(1,10,15,16)], p = 2, season = NULL, exog = NULL, type = "const")
+VAR_PR_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PR_pa, type="BG")
+arch.test(VAR_PR_pa, multivariate.only = FALSE)
+
+
+#Estimando o VAR Estrutural
+SVAR_PR_pa <- SVAR(VAR_PR_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PR_pa
+
+#Função Impulso-Resposta
+SVAR_PR_irf_pa <- irf(SVAR_PR_pa, impulse = "Selic.Over", response = "g_PR", n.ahead=20, ortho = TRUE)
+plot(SVAR_PR_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_PR_pe <- VARselect(base_SVAR_final[107:261,c(1,10,15,16)],lag.max=10, type="both")
+lagselect_PR_pe$selection
+lagselect_PR_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_PR_pe <- VAR(base_SVAR_final[107:261,c(1,10,15,16)], p = lagselect_PR_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_PR_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_PR_pe, type="BG")
+arch.test(VAR_PR_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_PR_pe <- SVAR(VAR_PR_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_PR_pe
+
+#Função Impulso-Resposta
+SVAR_PR_irf_pe <- irf(SVAR_PR_pe, impulse = "Selic.Over", response = "g_PR", n.ahead=20, ortho = TRUE)
+plot(SVAR_PR_irf_pe)
+```
+
+```{r}
+##########################################
+#################RIO DE JANEIRO#################
+##########################################
+#Selecionando o Lag
+lagselect_RJ <- VARselect(base_SVAR_final[,c(1,11,15,16)],lag.max=10, type="both")
+lagselect_RJ$selection
+lagselect_RJ$criteria
+
+#Estimando o VAR Reduzido
+VAR_RJ <- VAR(base_SVAR_final[,c(1,11,15,16)], p = lagselect_RJ$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RJ
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RJ, type="BG")
+arch.test(VAR_RJ, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_RJ <- SVAR(VAR_RJ, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RJ
+
+#Função Impulso-Resposta
+SVAR_RJ_irf <- irf(SVAR_RJ, impulse = "Selic.Over", response = "g_RJ", n.ahead=20, ortho = TRUE)
+plot(SVAR_RJ_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_RJ_pa <- VARselect(base_SVAR_final[1:106,c(1,11,15,16)],lag.max=10, type="both")
+lagselect_RJ_pa$selection
+lagselect_RJ_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_RJ_pa <- VAR(base_SVAR_final[1:106,c(1,11,15,16)], p = lagselect_RJ_pa$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RJ_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RJ_pa, type="BG")
+arch.test(VAR_RJ_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_RJ_pa <- SVAR(VAR_RJ_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RJ_pa
+
+#Função Impulso-Resposta
+SVAR_RJ_irf_pa <- irf(SVAR_RJ_pa, impulse = "Selic.Over", response = "g_RJ", n.ahead=20, ortho = TRUE)
+plot(SVAR_RJ_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_RJ_pe <- VARselect(base_SVAR_final[107:261,c(1,11,15,16)],lag.max=10, type="both")
+lagselect_RJ_pe$selection
+lagselect_RJ_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_RJ_pe <- VAR(base_SVAR_final[107:261,c(1,11,15,16)], p = lagselect_RJ_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RJ_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RJ_pe, type="BG")
+arch.test(VAR_RJ_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_RJ_pe <- SVAR(VAR_RJ_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RJ_pe
+#Função Impulso-Resposta
+SVAR_RJ_irf_pe <- irf(SVAR_RJ_pe, impulse = "Selic.Over", response = "g_RJ", n.ahead=20, ortho = TRUE)
+plot(SVAR_RJ_irf_pe)
+```
+
+```{r}
+##########################################
+#################RIO GRANDE DO SUL#################
+##########################################
+#Selecionando o Lag
+lagselect_RS <- VARselect(base_SVAR_final[,c(1,12,15,16)],lag.max=10, type="both")
+lagselect_RS$selection
+lagselect_RS$criteria
+
+#Estimando o VAR Reduzido
+VAR_RS <- VAR(base_SVAR_final[,c(1,12,15,16)], p = lagselect_RS$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RS
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RS, type="BG")
+arch.test(VAR_RS, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_RS <- SVAR(VAR_RS, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RS
+
+#Função Impulso-Resposta
+SVAR_RS_irf <- irf(SVAR_RS, impulse = "Selic.Over", response = "g_RS", n.ahead=20, ortho = TRUE)
+plot(SVAR_RS_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_RS_pa <- VARselect(base_SVAR_final[1:106,c(1,12,15,16)],lag.max=10, type="both")
+lagselect_RS_pa$selection
+lagselect_RS_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_RS_pa <- VAR(base_SVAR_final[1:106,c(1,12,15,16)], p = lagselect_RS_pa$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RS_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RS_pa, type="BG")
+arch.test(VAR_RS_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_RS_pa <- SVAR(VAR_RS_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RS_pa
+
+#Função Impulso-Resposta
+SVAR_RS_irf_pa <- irf(SVAR_RS_pa, impulse = "Selic.Over", response = "g_RS", n.ahead=20, ortho = TRUE)
+plot(SVAR_RS_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_RS_pe <- VARselect(base_SVAR_final[107:261,c(1,12,15,16)],lag.max=10, type="both")
+lagselect_RS_pe$selection
+lagselect_RS_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_RS_pe <- VAR(base_SVAR_final[107:261,c(1,12,15,16)], p = lagselect_RS_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_RS_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_RS_pe, type="BG")
+arch.test(VAR_RS_pe, multivariate.only = FALSE)
+
+
+#Estimando o VAR Estrutural
+SVAR_RS_pe <- SVAR(VAR_RS_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_RS_pe
+
+#Função Impulso-Resposta
+SVAR_RS_irf_pe <- irf(SVAR_RS_pe, impulse = "Selic.Over", response = "g_RS", n.ahead=20, ortho = TRUE)
+plot(SVAR_RS_irf_pe)
+
+```
+
+```{r}
+##########################################
+#################SANTA CATARINA#################
+##########################################
+#Selecionando o Lag
+lagselect_SC <- VARselect(base_SVAR_final[,c(1,13,15,16)],lag.max=10, type="both")
+lagselect_SC$selection
+lagselect_SC$criteria
+
+#Estimando o VAR Reduzido
+VAR_SC <- VAR(base_SVAR_final[,c(1,13,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_SC
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SC, type="BG")
+arch.test(VAR_SC, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SC <- SVAR(VAR_SC, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SC
+#Função Impulso-Resposta
+SVAR_SC_irf <- irf(SVAR_SC, impulse = "Selic.Over", response = "g_SC", n.ahead=20, ortho = TRUE)
+plot(SVAR_SC_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_SC_pa <- VARselect(base_SVAR_final[1:106,c(1,13,15,16)],lag.max=10, type="both")
+lagselect_SC_pa$selection
+lagselect_SC_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_SC_pa <- VAR(base_SVAR_final[1:106,c(1,13,15,16)], p = 2 , season = NULL, exog = NULL, type = "const")
+VAR_SC_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SC_pa, type="BG")
+arch.test(VAR_SC_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SC_pa <- SVAR(VAR_SC_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SC_pa
+
+#Função Impulso-Resposta
+SVAR_SC_irf_pa <- irf(SVAR_SC_pa, impulse = "Selic.Over", response = "g_SC", n.ahead=20, ortho = TRUE)
+plot(SVAR_SC_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_SC_pe <- VARselect(base_SVAR_final[107:261,c(1,13,15,16)],lag.max=10, type="both")
+lagselect_SC_pe$selection
+lagselect_SC_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_SC_pe <- VAR(base_SVAR_final[107:261,c(1,13,15,16)], p = lagselect_SC_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_SC_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SC_pe, type="BG")
+arch.test(VAR_SC_pe, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SC_pe <- SVAR(VAR_SC_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SC_pe
+
+#Função Impulso-Resposta
+SVAR_SC_irf_pe <- irf(SVAR_SC_pe, impulse = "Selic.Over", response = "g_SC", n.ahead=20, ortho = TRUE)
+plot(SVAR_SC_irf_pe)
+```
+
+```{r}
+##########################################
+#################SÃO PAULO#################
+##########################################
+#Selecionando o Lag
+lagselect_SP <- VARselect(base_SVAR_final[,c(1,14,15,16)],lag.max=10, type="both")
+lagselect_SP$selection
+lagselect_SP$criteria
+
+#Estimando o VAR Reduzido
+VAR_SP <- VAR(base_SVAR_final[,c(1,14,15,16)], p = 5, season = NULL, exog = NULL, type = "const")
+VAR_SP
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SP, type="BG")
+arch.test(VAR_SP, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SP <- SVAR(VAR_SP, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SP
+
+#Função Impulso-Resposta
+SVAR_SP_irf <- irf(SVAR_SP, impulse = "Selic.Over", response = "g_SP", n.ahead=20, ortho = TRUE)
+plot(SVAR_SP_irf)
+
+###Comparando Diferentes Períodos###
+
+#----------------Período dos Autores - 01-01-2002 até 01-11-2010----------------#
+
+#Selecionando o Lag
+lagselect_SP_pa <- VARselect(base_SVAR_final[1:106,c(1,14,15,16)],lag.max=10, type="both")
+lagselect_SP_pa$selection
+lagselect_SP_pa$criteria
+
+#Estimando o VAR Reduzido
+VAR_SP_pa <- VAR(base_SVAR_final[1:106,c(1,14,15,16)], p = 2, season = NULL, exog = NULL, type = "const")
+VAR_SP_pa
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SP_pa, type="BG")
+arch.test(VAR_SP_pa, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SP_pa <- SVAR(VAR_SP_pa, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SP_pa
+
+#Função Impulso-Resposta
+SVAR_SP_irf_pa <- irf(SVAR_SP_pa, impulse = "Selic.Over", response = "g_SP", n.ahead=20, ortho = TRUE)
+plot(SVAR_SP_irf_pa)
+
+#----------------Período Estendido - 01-12-2010 até 01-10-2023----------------#
+
+lagselect_SP_pe <- VARselect(base_SVAR_final[107:261,c(1,14,15,16)],lag.max=10, type="both")
+lagselect_SP_pe$selection
+lagselect_SP_pe$criteria
+
+#Estimando o VAR Reduzido
+VAR_SP_pe <- VAR(base_SVAR_final[107:261,c(1,14,15,16)], p = lagselect_SP_pe$selection[1], season = NULL, exog = NULL, type = "const")
+VAR_SP_pe
+
+#Testando para presença de autocorrelação e heterocedasticidade nos resíduos:
+
+serial.test(VAR_SP, type="BG")
+arch.test(VAR_SP, multivariate.only = FALSE)
+
+#Estimando o VAR Estrutural
+SVAR_SP_pe <- SVAR(VAR_SP_pe, Amat=amat, Bmat = NULL, hessian = TRUE, estmethod ="scoring")
+SVAR_SP_pe
+
+#Função Impulso-Resposta
+SVAR_SP_irf_pe <- irf(SVAR_SP_pe, impulse = "Selic.Over", response = "g_SP", n.ahead=20, ortho = TRUE)
+plot(SVAR_SP_irf_pe)
+```
+
